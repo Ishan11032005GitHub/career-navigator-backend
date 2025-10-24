@@ -46,7 +46,7 @@ app = FastAPI(title="Career Navigator AI")
 
 origins = [
     "https://ishan11032005github.github.io",
-    "https://career-navigator-ai-1.onrender.com",
+    "https://career-navigator-backend-production.up.railway.app",
     "http://localhost:3000",
     "http://127.0.0.1:3000",
 ]
