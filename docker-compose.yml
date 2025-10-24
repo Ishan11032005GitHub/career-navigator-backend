@@ -1,0 +1,33 @@
+version: '3.8'
+
+services:
+  career-ai:
+    build: .
+    ports:
+      - "8000:8000"
+    environment:
+      - DATA_ROOT=/home/app/data
+      - OLLAMA_URL=http://ollama:11434/api/generate
+      - OLLAMA_MODEL=gemma3:4b
+    volumes:
+      - career_data:/home/app/data
+    depends_on:
+      - ollama
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  ollama:
+    image: ollama/ollama:latest
+    ports:
+      - "11434:11434"
+    volumes:
+      - ollama_data:/root/.ollama
+    restart: unless-stopped
+
+volumes:
+  career_data:
+  ollama_data:

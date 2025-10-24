@@ -1,0 +1,47 @@
+# ---------- Web Framework ----------
+fastapi==0.115.2
+uvicorn==0.31.1
+python-multipart==0.0.12
+python-dotenv==1.0.1
+requests==2.32.3
+
+# ---------- Database ----------
+sqlite-utils==3.37
+sqlalchemy==2.0.35
+
+# ---------- Auth & Security ----------
+python-jose[cryptography]==3.3.0
+passlib[bcrypt]==1.7.4
+
+# ---------- NLP & Resume Analysis ----------
+spacy==3.7.4
+blis==0.7.9
+# ⚠️ avoid spacy-transformers (too heavy for Railway)
+nltk==3.9.1
+scikit-learn==1.5.2
+numpy==2.1.3
+pandas==2.2.3
+
+# ---------- PDF & LaTeX ----------
+reportlab==4.2.5
+fpdf2==2.8.1
+pypandoc==1.13
+PyMuPDF==1.24.10  # for `import fitz`
+
+# ---------- Async & Utility ----------
+aiohttp==3.12.15
+anyio==4.8.0
+pydantic==2.9.2
+attrs==25.1.0
+
+# ---------- Agent Framework ----------
+langgraph==0.2.3
+
+# ---------- Email ----------
+google-api-python-client==2.147.0
+google-auth==2.35.0
+google-auth-oauthlib==1.2.1
+email-validator==2.3.0
+
+# ---------- Optional ----------
+rich==13.9.2

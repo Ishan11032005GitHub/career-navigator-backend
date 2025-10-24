@@ -1,0 +1,8 @@
+.venv/
+__pycache__/
+.env
+*.log
+
+# Ignore Google OAuth credentials
+backend/credentials.json
+backend/token.pickle
