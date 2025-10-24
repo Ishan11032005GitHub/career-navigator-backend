@@ -46,14 +46,14 @@ app = FastAPI(title="Career Navigator AI")
 
 origins = [
     "https://ishan11032005github.github.io",
-    "https://ishan11032005github.github.io/career-navigator-frontend/",
     "http://localhost:3000",
     "http://127.0.0.1:3000",
+    "http://127.0.0.1:5500"
 ]
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=origins,       # Only allow your actual frontends
+    allow_origins=origins,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
