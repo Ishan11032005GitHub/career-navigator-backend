@@ -424,23 +424,23 @@ def career(req: ChatRequest, user=Depends(verify_token)):
     )
 
 
-# Add thread pool for async operations
-executor = ThreadPoolExecutor(max_workers=2)
+# Add this at the top with other imports
+executor = ThreadPoolExecutor(max_workers=1)
 
 @app.post("/api/learning", response_model=ChatResponse)
 async def learning(req: ChatRequest, user=Depends(verify_token)):
     try:
-        # Add timeout to prevent hanging
+        # Add timeout to prevent 504 errors
         result = await asyncio.wait_for(
             asyncio.get_event_loop().run_in_executor(
                 executor, 
                 lambda: learning_agent(req.dict(), thread_id=req.thread_id)
             ),
-            timeout=30.0  # 30 second timeout
+            timeout=25.0  # 25 seconds timeout
         )
         return ChatResponse(reply=result.get("reply", ""))
     except asyncio.TimeoutError:
-        raise HTTPException(status_code=504, detail="AI service timeout")
+        raise HTTPException(status_code=504, detail="AI service timeout - please try again")
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Learning service error: {str(e)}")
 
@@ -736,23 +736,39 @@ def clear_career_chat_history(user=Depends(verify_token)):
 @app.post("/api/learning/chat/save")
 def save_learning_chat(chat: dict, user=Depends(verify_token)):
     message, reply = chat.get("message"), chat.get("reply")
+    
+    # Better validation
     if not message or not reply:
-        raise HTTPException(status_code=400, detail="Missing chat data")
+        raise HTTPException(
+            status_code=400, 
+            detail="Missing chat data. Both message and reply are required."
+        )
+    
+    if message.strip() == "" or reply.strip() == "":
+        raise HTTPException(
+            status_code=400, 
+            detail="Message and reply cannot be empty."
+        )
 
     conn = get_db()
     cur = conn.cursor()
-    cur.execute("SELECT id FROM users WHERE username=?", (user,))
-    row = cur.fetchone()
-    if not row:
-        raise HTTPException(status_code=404, detail="User not found")
+    try:
+        cur.execute("SELECT id FROM users WHERE username=?", (user,))
+        row = cur.fetchone()
+        if not row:
+            raise HTTPException(status_code=404, detail="User not found")
 
-    cur.execute(
-        "INSERT INTO learning_chat_history (user_id, message, reply) VALUES (?, ?, ?)",
-        (row["id"], message, reply)
-    )
-    conn.commit()
-    conn.close()
-    return {"msg": "Learning chat saved successfully"}
+        cur.execute(
+            "INSERT INTO learning_chat_history (user_id, message, reply) VALUES (?, ?, ?)",
+            (row["id"], message.strip(), reply.strip())
+        )
+        conn.commit()
+        return {"msg": "Learning chat saved successfully"}
+    except Exception as e:
+        conn.rollback()
+        raise HTTPException(status_code=500, detail=str(e))
+    finally:
+        conn.close()
 
 
 @app.get("/api/learning/chat/history")
