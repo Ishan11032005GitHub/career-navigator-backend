@@ -4,11 +4,11 @@ from datetime import datetime
 import os
 
 def get_db():
-    """Get database connection with cross-platform support"""
+    """Get database connection - MUST MATCH init_database() path"""
     if os.name == "nt":  # Windows
         DATA_ROOT = os.path.abspath(r"C:\career_ai_data")
         db_path = os.path.join(DATA_ROOT, "career_ai.db")
-    else:  # Linux/Render
+    else:  # Linux/Railway
         DATA_ROOT = os.path.abspath("/app/data")
         db_path = os.path.join(DATA_ROOT, "career_ai.db")
     

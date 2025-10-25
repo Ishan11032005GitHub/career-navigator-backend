@@ -16,6 +16,9 @@ from pydantic import BaseModel, EmailStr
 import smtplib
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
+import asyncio
+from concurrent.futures import ThreadPoolExecutor
+
 
 # ==========================================================
 # ✅ MiKTeX PATH (only for local Windows dev, skip on Render)
@@ -196,6 +199,31 @@ async def startup_event():
     print("🚀 Starting up Career Navigator AI...")
     init_database()
     print("✅ Database initialization completed")
+
+@app.get("/debug/db-check")
+async def debug_db_check():
+    """Debug endpoint to check database connection"""
+    try:
+        conn = get_db()
+        cur = conn.cursor()
+        
+        # Check if learning_chat_history table exists
+        cur.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='learning_chat_history'")
+        table_exists = cur.fetchone() is not None
+        
+        # Check users table
+        cur.execute("SELECT COUNT(*) as count FROM users")
+        user_count = cur.fetchone()["count"]
+        
+        conn.close()
+        
+        return {
+            "database_connected": True,
+            "learning_chat_history_table_exists": table_exists,
+            "user_count": user_count
+        }
+    except Exception as e:
+        return {"database_connected": False, "error": str(e)}
 
 # ==========================================================
 # SINGLE PDF DOWNLOAD ENDPOINT (remove the duplicate!)
@@ -396,10 +424,25 @@ def career(req: ChatRequest, user=Depends(verify_token)):
     )
 
 
+# Add thread pool for async operations
+executor = ThreadPoolExecutor(max_workers=2)
+
 @app.post("/api/learning", response_model=ChatResponse)
-def learning(req: ChatRequest, user=Depends(verify_token)):
-    result = learning_agent(req.dict(), thread_id=req.thread_id)
-    return ChatResponse(reply=result.get("reply", ""))
+async def learning(req: ChatRequest, user=Depends(verify_token)):
+    try:
+        # Add timeout to prevent hanging
+        result = await asyncio.wait_for(
+            asyncio.get_event_loop().run_in_executor(
+                executor, 
+                lambda: learning_agent(req.dict(), thread_id=req.thread_id)
+            ),
+            timeout=30.0  # 30 second timeout
+        )
+        return ChatResponse(reply=result.get("reply", ""))
+    except asyncio.TimeoutError:
+        raise HTTPException(status_code=504, detail="AI service timeout")
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Learning service error: {str(e)}")
 
 # ==========================================================
 # JOB ROUTES
