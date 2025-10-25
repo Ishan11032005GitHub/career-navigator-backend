@@ -306,6 +306,93 @@ async def test_download():
         "download_url": f"/download-pdf/{test_filename}"
     }
 
+@app.post("/api/debug/learning-test")
+async def debug_learning_test(test_data: dict):
+    """Test the learning agent with a simple prompt"""
+    try:
+        # Use the same wrapper but with a known-good prompt
+        simple_prompt = "Explain what Python programming is in one sentence."
+        
+        result = await asyncio.wait_for(
+            asyncio.get_event_loop().run_in_executor(
+                executor,
+                lambda: learning_agent({"message": simple_prompt}, thread_id="debug-test")
+            ),
+            timeout=15.0
+        )
+        
+        return {
+            "status": "success",
+            "result": result,
+            "agent_working": True
+        }
+        
+    except asyncio.TimeoutError:
+        return {"status": "timeout", "agent_working": False}
+    except Exception as e:
+        return {"status": "error", "error": str(e), "agent_working": False}
+
+@app.get("/api/debug/ollama-test")
+async def debug_ollama_test():
+    """Test Ollama connection directly"""
+    import requests
+    import json
+    import time
+    
+    test_prompt = "Hello, please respond with 'OK' if you can hear me."
+    
+    try:
+        start_time = time.time()
+        
+        # Test the exact same Ollama call that learning_agent uses
+        response = requests.post(
+            "http://localhost:11434/api/generate",
+            json={
+                "model": "gemma3:4b",
+                "prompt": test_prompt,
+                "stream": False
+            },
+            timeout=10
+        )
+        
+        processing_time = time.time() - start_time
+        
+        if response.status_code == 200:
+            result = response.json()
+            return {
+                "status": "success",
+                "response": result.get("response", "No response"),
+                "processing_time": f"{processing_time:.2f}s",
+                "ollama_status": "connected"
+            }
+        else:
+            return {
+                "status": "http_error", 
+                "status_code": response.status_code,
+                "error": response.text,
+                "processing_time": f"{processing_time:.2f}s",
+                "ollama_status": "error"
+            }
+            
+    except requests.exceptions.ConnectionError:
+        return {
+            "status": "connection_error",
+            "error": "Cannot connect to Ollama at localhost:11434",
+            "ollama_status": "disconnected"
+        }
+    except requests.exceptions.Timeout:
+        return {
+            "status": "timeout",
+            "error": "Ollama request timed out after 10 seconds",
+            "ollama_status": "timeout"
+        }
+    except Exception as e:
+        return {
+            "status": "error",
+            "error": str(e),
+            "ollama_status": "unknown_error"
+        }
+
 # REMOVE THIS DUPLICATE ENDPOINT:
 # @app.get("/generated_resumes/{filename}")
 # async def download_generated_resume(filename: str):
@@ -487,28 +574,51 @@ async def learning(req: ChatRequest, user=Depends(verify_token)):
             detail=f"Learning service temporarily unavailable: {str(e)}"
         )
 
+def fallback_ai_response(prompt: str) -> str:
+    """Fallback to a simple rule-based response if Ollama fails"""
+    prompt_lower = prompt.lower()
+    
+    if any(word in prompt_lower for word in ['python', 'programming']):
+        return "Python is a versatile programming language great for beginners and professionals alike. It's known for its simple syntax and wide range of applications from web development to data science."
+    
+    elif any(word in prompt_lower for word in ['javascript', 'web']):
+        return "JavaScript is essential for web development, enabling interactive websites and applications. It runs in browsers and can also be used on servers with Node.js."
+    
+    elif any(word in prompt_lower for word in ['learn', 'study']):
+        return "I recommend starting with online tutorials, practicing regularly, and building small projects. Consistency is key to learning effectively!"
+    
+    else:
+        return "I'd be happy to help you learn! Please ask me about specific programming languages, technologies, or learning strategies."
+
 def learning_agent_wrapper(request_data, thread_id, user):
     """
-    Wrapper function to add better error handling and logging
+    Wrapper function with fallback to basic responses
     """
     try:
-        # Add progress logging
         logging.info(f"[LEARNING_AGENT] Processing for user: {user}")
         
-        # Call the actual learning agent
+        # Try the actual learning agent first
         result = learning_agent(request_data, thread_id=thread_id)
         
-        # Validate response
-        if not result or not result.get("reply"):
-            logging.warning(f"[LEARNING_AGENT] Empty response for user: {user}")
-            return {"reply": "I apologize, but I couldn't generate a response. Please try again."}
+        # If we get the technical difficulties message, use fallback
+        if (result and result.get("reply") and 
+            "technical difficulties" in result.get("reply", "").lower()):
+            
+            logging.warning(f"[LEARNING_AGENT] Using fallback for user: {user}")
+            user_message = request_data.get("message", "")
+            fallback_reply = fallback_ai_response(user_message)
+            
+            return {"reply": f"🤖 {fallback_reply}\n\n*(Note: Using basic response mode)*"}
             
         return result
         
     except Exception as e:
         logging.error(f"[LEARNING_AGENT] Critical error for user {user}: {str(e)}")
+        user_message = request_data.get("message", "")
+        fallback_reply = fallback_ai_response(user_message)
+        
         return {
-            "reply": "I'm experiencing technical difficulties. Please try again in a moment."
+            "reply": f"🤖 {fallback_reply}\n\n*(Note: Using basic response due to technical issues)*"
         }
 
 # ==========================================================
