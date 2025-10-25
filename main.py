@@ -18,7 +18,21 @@ from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
 import asyncio
 from concurrent.futures import ThreadPoolExecutor
+import logging
+import time
+from fastapi import Request
+from circuitbreaker import circuit_breaker
+import logging
 
+# Add this to your main.py imports
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+    handlers=[
+        logging.StreamHandler(),
+        logging.FileHandler('app.log')  # Optional: log to file
+    ]
+)
 
 # ==========================================================
 # ✅ MiKTeX PATH (only for local Windows dev, skip on Render)
@@ -39,6 +53,19 @@ class SignupRequest(BaseModel):
 class LoginRequest(BaseModel):
     email: EmailStr
     password: str
+
+class LearningService:
+    def __init__(self):
+        self.failure_count = 0
+        self.last_failure_time = 0
+        self.circuit_open = False
+        
+    @circuit_breaker(failure_threshold=3, recovery_timeout=30)
+    def call_learning_agent(self, request_data, thread_id):
+        return learning_agent(request_data, thread_id=thread_id)
+
+learning_service = LearningService()
+
 
 # ==========================================================
 # INIT
@@ -191,6 +218,17 @@ def init_database():
     else:
         print(f"🆕 Created new DB: {db_path}")
     print("✅ All tables created successfully!")
+
+@app.middleware("http")
+async def log_requests(request: Request, call_next):
+    start_time = time.time()
+    
+    response = await call_next(request)
+    
+    process_time = time.time() - start_time
+    logging.info(f"{request.method} {request.url.path} - Status: {response.status_code} - Time: {process_time:.2f}s")
+    
+    return response
 
 # Add this startup event
 @app.on_event("startup")
@@ -423,26 +461,68 @@ def career(req: ChatRequest, user=Depends(verify_token)):
         intent=result.get("intent")
     )
 
-
-# Add this at the top with other imports
-executor = ThreadPoolExecutor(max_workers=1)
+# Configure executor with more workers
+executor = ThreadPoolExecutor(max_workers=3)  # Increased from 1 to 3
 
 @app.post("/api/learning", response_model=ChatResponse)
 async def learning(req: ChatRequest, user=Depends(verify_token)):
+    """
+    Optimized learning endpoint with better timeout handling and error management
+    """
     try:
-        # Add timeout to prevent 504 errors
+        logging.info(f"[LEARNING] Starting request for user: {user}")
+        
+        # Convert request to dict once
+        request_data = req.dict()
+        
+        # Run the learning agent with timeout
         result = await asyncio.wait_for(
             asyncio.get_event_loop().run_in_executor(
                 executor, 
-                lambda: learning_agent(req.dict(), thread_id=req.thread_id)
+                lambda: learning_agent_wrapper(request_data, req.thread_id, user)
             ),
-            timeout=25.0  # 25 seconds timeout
+            timeout=20.0  # Reduced from 25s to 20s for faster failover
         )
+        
+        logging.info(f"[LEARNING] Successfully processed request for user: {user}")
         return ChatResponse(reply=result.get("reply", ""))
+        
     except asyncio.TimeoutError:
-        raise HTTPException(status_code=504, detail="AI service timeout - please try again")
+        logging.error(f"[LEARNING] Timeout for user: {user}")
+        raise HTTPException(
+            status_code=504, 
+            detail="AI service timeout - please try again with a simpler question"
+        )
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Learning service error: {str(e)}")
+        logging.error(f"[LEARNING] Error for user {user}: {str(e)}")
+        raise HTTPException(
+            status_code=500, 
+            detail=f"Learning service temporarily unavailable: {str(e)}"
+        )
+
+def learning_agent_wrapper(request_data, thread_id, user):
+    """
+    Wrapper function to add better error handling and logging
+    """
+    try:
+        # Add progress logging
+        logging.info(f"[LEARNING_AGENT] Processing for user: {user}")
+        
+        # Call the actual learning agent
+        result = learning_agent(request_data, thread_id=thread_id)
+        
+        # Validate response
+        if not result or not result.get("reply"):
+            logging.warning(f"[LEARNING_AGENT] Empty response for user: {user}")
+            return {"reply": "I apologize, but I couldn't generate a response. Please try again."}
+            
+        return result
+        
+    except Exception as e:
+        logging.error(f"[LEARNING_AGENT] Critical error for user {user}: {str(e)}")
+        return {
+            "reply": "I'm experiencing technical difficulties. Please try again in a moment."
+        }
 
 # ==========================================================
 # JOB ROUTES

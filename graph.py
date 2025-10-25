@@ -4,10 +4,14 @@ from typing import Dict, Any
 from langgraph.graph import StateGraph, END
 from langgraph.checkpoint.memory import MemorySaver
 import tempfile
+import threading
+import time
+import logging
 
 from tools import analyze_resume, match_jobs, generate_learning_path, quick_quiz
 import os, re, subprocess, uuid
 import fitz  # PyMuPDF (already used in your project)
+
 
 DATA_ROOT = os.getenv("DATA_ROOT", r"C:\career_ai_data")
 GEN_DIR = os.path.join(DATA_ROOT, "generated_resumes")
@@ -16,6 +20,32 @@ os.makedirs(GEN_DIR, exist_ok=True)
 # --- Load env file early ---
 if not load_dotenv():
     print("⚠️ Warning: .env file not found", file=sys.stderr)
+
+
+# --- Thread-safe memory store ---
+class ThreadSafeMemoryStore:
+    def __init__(self):
+        self._store = {}
+        self._lock = threading.RLock()
+    
+    def get(self, thread_id, default=None):
+        with self._lock:
+            return self._store.get(thread_id, default)
+    
+    def set(self, thread_id, value):
+        with self._lock:
+            self._store[thread_id] = value
+    
+    def append(self, thread_id, value):
+        with self._lock:
+            if thread_id not in self._store:
+                self._store[thread_id] = []
+            self._store[thread_id].append(value)
+            # Keep only last 10 messages to prevent memory bloat
+            if len(self._store[thread_id]) > 10:
+                self._store[thread_id] = self._store[thread_id][-10:]
+
+memory_store = ThreadSafeMemoryStore()
 
 
 # --- Ollama config (free local LLM) ---
@@ -48,7 +78,6 @@ OLLAMA_MODEL = os.getenv("OLLAMA_MODEL", "gemma3:4b")
 def _format_err(prefix: str, detail: str) -> str:
     return f"{prefix}: {detail}"
 
-
 def _explain_ollama_http_error(resp: requests.Response) -> str:
     """
     Try to provide a helpful message when Ollama responds with a non-200.
@@ -64,71 +93,91 @@ def _explain_ollama_http_error(resp: requests.Response) -> str:
         return _format_err("⚠️ Ollama error", f"Model '{OLLAMA_MODEL}' not found. Try: `ollama pull {OLLAMA_MODEL}`")
     return _format_err("⚠️ Ollama HTTP error", f"status={resp.status_code}, body={data}")
 
-
-# ---- Ollama invoke ----
-def safe_llm_invoke(prompt: str) -> str:
+# ---- Optimized Ollama invoke with timeout ----
+def safe_llm_invoke(prompt: str, timeout: int = 30) -> str:
     """
-    Send a prompt to Ollama and stream back the text output.
-    Robust to Windows/PowerShell chunking and stray decode artifacts.
+    Send a prompt to Ollama with strict timeout and better error handling
     """
+    start_time = time.time()
+    
+    # Truncate very long prompts to prevent timeouts
+    if len(prompt) > 4000:
+        prompt = prompt[:4000] + "... [truncated]"
+    
     try:
+        logging.info(f"[LLM] Sending request to Ollama (timeout: {timeout}s)")
+        
         r = requests.post(
             OLLAMA_URL,
-            json={"model": OLLAMA_MODEL, "prompt": prompt, "stream": True},
+            json={
+                "model": OLLAMA_MODEL, 
+                "prompt": prompt, 
+                "stream": True,
+                "options": {
+                    "temperature": 0.7,
+                    "num_predict": 500  # Limit response length
+                }
+            },
             stream=True,
-            timeout=180,
+            timeout=timeout,
         )
 
         if r.status_code != 200:
-            return _explain_ollama_http_error(r)
+            error_msg = _explain_ollama_http_error(r)
+            logging.error(f"[LLM] HTTP error: {error_msg}")
+            return error_msg
 
         full = []
-        # Ollama sends one JSON object per line when stream=True.
-        # Read line-by-line and parse each independently (no cross-line buffering).
-        for line in r.iter_lines(decode_unicode=True):
+        line_count = 0
+        
+        for line in r.iter_lines(decode_unicode=True, timeout=timeout):
+            if time.time() - start_time > timeout:
+                logging.warning(f"[LLM] Request timeout after {timeout}s")
+                return "⚠️ Request timeout - response took too long"
+                
             if not line:
                 continue
+                
             line = line.strip()
             if not line:
                 continue
+                
             try:
                 obj = json.loads(line)
             except json.JSONDecodeError:
-                # Ignore any malformed fragments and keep going.
                 continue
 
             if "response" in obj:
                 full.append(obj["response"])
+                line_count += 1
+                
             if obj.get("done"):
                 break
 
         text = "".join(full).strip()
+        processing_time = time.time() - start_time
+        
+        logging.info(f"[LLM] Response received in {processing_time:.2f}s, {line_count} lines")
 
-        # Optional single-shot fallback if nothing arrived (keeps functionality same but more reliable)
+        # Fallback for empty responses
         if not text:
-            try:
-                r2 = requests.post(
-                    OLLAMA_URL,
-                    json={"model": OLLAMA_MODEL, "prompt": prompt, "stream": False},
-                    timeout=60,
-                )
-                if r2.status_code == 200:
-                    data2 = r2.json()
-                    text = (data2.get("response") or "").strip()
-                else:
-                    return _explain_ollama_http_error(r2)
-            except requests.exceptions.RequestException:
-                # If even fallback fails, surface the original empty-stream message
-                pass
+            logging.warning("[LLM] Empty response, using fallback")
+            return "I apologize, but I couldn't generate a proper response. Please try rephrasing your question."
 
-        return text if text else "⚠️ Ollama produced no text (stream was empty)."
+        return text
 
     except requests.exceptions.ConnectionError:
-        return f"⚠️ Cannot reach Ollama at {OLLAMA_URL}. Please run `ollama serve`."
+        error_msg = f"⚠️ Cannot reach Ollama at {OLLAMA_URL}. Please run `ollama serve`."
+        logging.error(f"[LLM] Connection error: {error_msg}")
+        return error_msg
     except requests.exceptions.Timeout:
-        return "⚠️ Ollama request timed out."
+        error_msg = f"⚠️ Ollama request timed out after {timeout}s."
+        logging.error(f"[LLM] Timeout: {error_msg}")
+        return error_msg
     except Exception as e:
-        return f"⚠️ Unexpected error: {type(e).__name__}: {e}"
+        error_msg = f"⚠️ Unexpected error: {type(e).__name__}: {e}"
+        logging.error(f"[LLM] Unexpected error: {error_msg}")
+        return error_msg
 
 
 # ---- Agent nodes ----
@@ -546,44 +595,74 @@ def career_agent(state: Dict[str, Any]):
 memory_store: Dict[str, list] = {}
 
 
+# ---- Optimized Learning Agent ----
 def learning_agent(state: Dict[str, Any], thread_id: str = "default"):
+    """
+    Optimized learning agent with timeout protection and better error handling
+    """
+    start_time = time.time()
+    
     # Allow thread_id to be passed either as arg (backend direct call) or via state (graph mode)
     thread = state.get("thread_id") or thread_id or "default"
-    topic = state.get("message", "a topic")
+    topic = state.get("message", "Please help me learn about this topic")
+    
+    # Validate input
+    if not topic or len(topic.strip()) < 2:
+        return {"reply": "Please provide a specific topic or question you'd like to learn about."}
 
-    # Retrieve or create memory for this thread
-    history = memory_store.get(thread, [])
-    context_text = "\n".join(history[-3:])  # last 3 exchanges
+    logging.info(f"[LEARNING_AGENT] Starting for thread: {thread}, topic: {topic[:100]}...")
 
-    # Build a contextual prompt
-    mainSubject = safe_llm_invoke(
-        f"Extract the main subject(s) of this request in 1–3 words max: {topic}"
-    ).strip()
+    try:
+        # Retrieve history with timeout protection
+        history = memory_store.get(thread, [])
+        context_text = "\n".join(history[-2:]) if history else "No previous context"  # Reduced from 3 to 2
 
-    response_prompt = f"""
-You are a helpful learning mentor. Maintain context of previous chats:
+        # SIMPLIFIED prompt - this was likely causing the timeout
+        response_prompt = f"""You are a helpful learning mentor. Be concise and practical.
+
+Previous conversation:
 {context_text}
 
-Current user question: "{topic}"
-Main subject: {mainSubject}
+User's current question: "{topic}"
 
-Generate a 5-day roadmap OR detailed explanation, quiz, and mini project idea.
-"""
+Provide a helpful explanation or learning suggestion. Keep it under 300 words.
+Focus on practical advice and clear explanations."""
 
-    reply = safe_llm_invoke(response_prompt)
-    if not reply.strip():
-        reply = "⚠️ The model returned no content."
+        logging.info(f"[LEARNING_AGENT] Sending prompt to LLM")
+        
+        # Use shorter timeout for learning agent
+        reply = safe_llm_invoke(response_prompt, timeout=15)
+        
+        processing_time = time.time() - start_time
+        logging.info(f"[LEARNING_AGENT] LLM response received in {processing_time:.2f}s")
 
-    history.append(f"User: {topic}\nAssistant: {reply}")
-    memory_store[thread] = history
-    return {"reply": reply}
+        # Validate response
+        if not reply or reply.startswith("⚠️"):
+            logging.warning(f"[LEARNING_AGENT] LLM returned error or empty response: {reply}")
+            reply = "I apologize, but I'm having trouble generating a learning response right now. Please try again with a different question or topic."
+
+        # Store in memory (thread-safe)
+        memory_store.append(thread, f"User: {topic}\nAssistant: {reply}")
+
+        logging.info(f"[LEARNING_AGENT] Successfully completed in {time.time() - start_time:.2f}s")
+        
+        return {"reply": reply.strip()}
+
+    except Exception as e:
+        error_time = time.time() - start_time
+        logging.error(f"[LEARNING_AGENT] Critical error after {error_time:.2f}s: {str(e)}")
+        
+        return {
+            "reply": "I'm experiencing technical difficulties with the learning service. Please try again in a moment or contact support if this continues."
+        }
 
 
 def chitchat(state: Dict[str, Any]):
     msg = state.get("message", "")
-    reply = safe_llm_invoke(f"Answer briefly and helpfully: {msg}")
+    # Use shorter timeout for chitchat
+    reply = safe_llm_invoke(f"Answer briefly and helpfully: {msg}", timeout=10)
     if not reply.strip():
-        reply = "⚠️ The model returned no content."
+        reply = "I apologize, but I couldn't generate a response. Please try again."
     return {"reply": reply}
 
 
@@ -612,6 +691,5 @@ def build_graph():
 
     memory = MemorySaver()
     return g.compile(checkpointer=memory)
-
 
 app_graph = build_graph()
