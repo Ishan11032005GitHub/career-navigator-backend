@@ -21,7 +21,6 @@ from concurrent.futures import ThreadPoolExecutor
 import logging
 import time
 from fastapi import Request
-from circuitbreaker import circuit_breaker
 import logging
 
 # Add this to your main.py imports
@@ -29,8 +28,8 @@ logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
     handlers=[
-        logging.StreamHandler(),
-        logging.FileHandler('app.log')  # Optional: log to file
+        logging.StreamHandler()
+        # Remove FileHandler for now to avoid permission issues
     ]
 )
 
@@ -44,27 +43,6 @@ if os.name == "nt":  # Windows only
     print("[INFO] MiKTeX path added to PATH:", miktex_path)
 else:
     print("[INFO] Running on Linux container — skipping MiKTeX PATH setup.")
-
-class SignupRequest(BaseModel):
-    email: EmailStr
-    username: str
-    password: str
-
-class LoginRequest(BaseModel):
-    email: EmailStr
-    password: str
-
-class LearningService:
-    def __init__(self):
-        self.failure_count = 0
-        self.last_failure_time = 0
-        self.circuit_open = False
-        
-    @circuit_breaker(failure_threshold=3, recovery_timeout=30)
-    def call_learning_agent(self, request_data, thread_id):
-        return learning_agent(request_data, thread_id=thread_id)
-
-learning_service = LearningService()
 
 
 # ==========================================================
