@@ -44,6 +44,15 @@ if os.name == "nt":  # Windows only
 else:
     print("[INFO] Running on Linux container — skipping MiKTeX PATH setup.")
 
+class SignupRequest(BaseModel):
+    email: EmailStr
+    username: str
+    password: str
+
+class LoginRequest(BaseModel):
+    email: EmailStr
+    password: str
+
 
 # ==========================================================
 # INIT
