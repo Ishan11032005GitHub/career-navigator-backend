@@ -72,6 +72,131 @@ app.mount("/generated_resumes", StaticFiles(directory=GENERATED_DIR), name="gene
 print(f"📂 Serving uploads from: {UPLOAD_DIR}")
 print(f"📄 Serving generated resumes from: {GENERATED_DIR}")
 
+
+import sqlite3
+import os
+
+# Add this function - FIXED VERSION (removed duplicate jobs table)
+def init_database():
+    """Initialize database with all required tables"""
+    # Use the same cross-platform path as your file uploads
+    if os.name == "nt":  # Windows
+        DATA_ROOT = os.path.abspath(r"C:\career_ai_data")
+        db_path = os.path.join(DATA_ROOT, "career_ai.db")
+    else:  # Linux/Render
+        DATA_ROOT = os.path.abspath("/app/data")
+        db_path = os.path.join(DATA_ROOT, "career_ai.db")
+    
+    os.makedirs(os.path.dirname(db_path), exist_ok=True)
+    
+    db_exists = os.path.exists(db_path)
+    conn = sqlite3.connect(db_path)
+    cur = conn.cursor()
+
+    # -----------------------
+    # USERS TABLE
+    # -----------------------
+    cur.execute("""
+    CREATE TABLE IF NOT EXISTS users (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        email TEXT UNIQUE NOT NULL,
+        username TEXT UNIQUE NOT NULL,
+        password TEXT NOT NULL,
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+    )
+    """)
+
+    # -----------------------
+    # JOBS TABLE (SINGLE VERSION - removed duplicate)
+    # -----------------------
+    cur.execute("""
+    CREATE TABLE IF NOT EXISTS jobs (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        title TEXT NOT NULL,
+        company TEXT NOT NULL,
+        location TEXT,
+        description TEXT,
+        link TEXT,
+        posted_by TEXT,
+        posted_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+    )
+    """)
+
+    # -----------------------
+    # APPLICATIONS TABLE
+    # -----------------------
+    cur.execute("""
+    CREATE TABLE IF NOT EXISTS applications (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        user_id INTEGER NOT NULL,
+        job_id INTEGER NOT NULL,
+        resume_path TEXT NOT NULL,
+        applied_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        FOREIGN KEY (user_id) REFERENCES users(id),
+        FOREIGN KEY (job_id) REFERENCES jobs(id)
+    )
+    """)
+
+    # -----------------------
+    # SAVED JOBS TABLE
+    # -----------------------
+    cur.execute("""
+    CREATE TABLE IF NOT EXISTS saved_jobs (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        user_id INTEGER NOT NULL,
+        job_id INTEGER NOT NULL,
+        saved_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        UNIQUE(user_id, job_id),
+        FOREIGN KEY (user_id) REFERENCES users(id),
+        FOREIGN KEY (job_id) REFERENCES jobs(id)
+    )
+    """)
+
+    # -----------------------
+    # CAREER CHAT HISTORY TABLE
+    # -----------------------
+    cur.execute("""
+    CREATE TABLE IF NOT EXISTS career_chat_history (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        user_id INTEGER NOT NULL,
+        message TEXT NOT NULL,
+        reply TEXT NOT NULL,
+        timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        FOREIGN KEY (user_id) REFERENCES users(id)
+    )
+    """)
+
+    # -----------------------
+    # LEARNING CHAT HISTORY TABLE (THE MISSING TABLE!)
+    # -----------------------
+    cur.execute("""
+    CREATE TABLE IF NOT EXISTS learning_chat_history (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        user_id INTEGER NOT NULL,
+        message TEXT NOT NULL,
+        reply TEXT NOT NULL,
+        timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        FOREIGN KEY (user_id) REFERENCES users(id)
+    )
+    """)
+
+    conn.commit()
+    conn.close()
+
+    if db_exists:
+        print(f"📁 Using existing DB: {db_path}")
+    else:
+        print(f"🆕 Created new DB: {db_path}")
+    print("✅ All tables created successfully!")
+
+# Add this startup event
+@app.on_event("startup")
+async def startup_event():
+    """Initialize database on startup"""
+    print("🚀 Starting up Career Navigator AI...")
+    init_database()
+    print("✅ Database initialization completed")
+
 # ==========================================================
 # SINGLE PDF DOWNLOAD ENDPOINT (remove the duplicate!)
 # ==========================================================
