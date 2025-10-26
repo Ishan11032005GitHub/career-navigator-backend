@@ -284,7 +284,7 @@ async def download_pdf(filename: str):
             'Access-Control-Expose-Headers': 'Content-Disposition'
         }
     )
-# Add this to your main.py after the other endpoints
+
 @app.get("/test-download")
 async def test_download():
     """Test if download endpoint works by creating a test PDF"""
@@ -393,22 +393,6 @@ async def debug_ollama_test():
             "ollama_status": "unknown_error"
         }
 
-# REMOVE THIS DUPLICATE ENDPOINT:
-# @app.get("/generated_resumes/{filename}")
-# async def download_generated_resume(filename: str):
-#     """Serve generated PDF files directly"""
-#     file_path = os.path.join(GENERATED_DIR, filename)
-#     if not os.path.exists(file_path):
-#         raise HTTPException(status_code=404, detail="File not found")
-#     
-#     # Return as file download with proper headers
-#     return FileResponse(
-#         file_path,
-#         media_type='application/pdf',
-#         filename=filename,
-#         headers={'Content-Disposition': f'attachment; filename="{filename}"'}
-#     )
-
 # ==========================================================
 # AUTH ROUTES
 # ==========================================================
@@ -475,8 +459,6 @@ def forgot(user: dict):
 
     token = create_reset_token(user_email)
 
-    # reset_link = f"http://localhost:3000/reset?token={token}"
-
     body = f"""
 Hi {user_name},
 
@@ -484,7 +466,7 @@ Here is your password reset token:
 
 {token}
 
-If you didn’t request a password reset, you can safely ignore this email.
+If you didn't request a password reset, you can safely ignore this email.
 
 – Career Navigator AI
 """
@@ -574,51 +556,28 @@ async def learning(req: ChatRequest, user=Depends(verify_token)):
             detail=f"Learning service temporarily unavailable: {str(e)}"
         )
 
-def fallback_ai_response(prompt: str) -> str:
-    """Fallback to a simple rule-based response if Ollama fails"""
-    prompt_lower = prompt.lower()
-    
-    if any(word in prompt_lower for word in ['python', 'programming']):
-        return "Python is a versatile programming language great for beginners and professionals alike. It's known for its simple syntax and wide range of applications from web development to data science."
-    
-    elif any(word in prompt_lower for word in ['javascript', 'web']):
-        return "JavaScript is essential for web development, enabling interactive websites and applications. It runs in browsers and can also be used on servers with Node.js."
-    
-    elif any(word in prompt_lower for word in ['learn', 'study']):
-        return "I recommend starting with online tutorials, practicing regularly, and building small projects. Consistency is key to learning effectively!"
-    
-    else:
-        return "I'd be happy to help you learn! Please ask me about specific programming languages, technologies, or learning strategies."
-
 def learning_agent_wrapper(request_data, thread_id, user):
     """
-    Wrapper function with fallback to basic responses
+    Wrapper function to add better error handling and logging
     """
     try:
+        # Add progress logging
         logging.info(f"[LEARNING_AGENT] Processing for user: {user}")
         
-        # Try the actual learning agent first
+        # Call the actual learning agent
         result = learning_agent(request_data, thread_id=thread_id)
         
-        # If we get the technical difficulties message, use fallback
-        if (result and result.get("reply") and 
-            "technical difficulties" in result.get("reply", "").lower()):
-            
-            logging.warning(f"[LEARNING_AGENT] Using fallback for user: {user}")
-            user_message = request_data.get("message", "")
-            fallback_reply = fallback_ai_response(user_message)
-            
-            return {"reply": f"🤖 {fallback_reply}\n\n*(Note: Using basic response mode)*"}
+        # Validate response
+        if not result or not result.get("reply"):
+            logging.warning(f"[LEARNING_AGENT] Empty response for user: {user}")
+            return {"reply": "I apologize, but I couldn't generate a response. Please try again."}
             
         return result
         
     except Exception as e:
         logging.error(f"[LEARNING_AGENT] Critical error for user {user}: {str(e)}")
-        user_message = request_data.get("message", "")
-        fallback_reply = fallback_ai_response(user_message)
-        
         return {
-            "reply": f"🤖 {fallback_reply}\n\n*(Note: Using basic response due to technical issues)*"
+            "reply": "I'm experiencing technical difficulties. Please try again in a moment."
         }
 
 # ==========================================================
