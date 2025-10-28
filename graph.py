@@ -59,7 +59,7 @@ def safe_llm_invoke(prompt: str, timeout: int = 30) -> str:
         response = requests.post(
             "https://openrouter.ai/api/v1/chat/completions",
             headers={
-                "Authorization": f"Bearer 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",
+                "Authorization": f"Bearer {os.getenv('OPENROUTER_API_KEY', '')}",
                 "Content-Type": "application/json"
             },
             json={
