@@ -51,6 +51,7 @@ memory_store = ThreadSafeMemoryStore()
 # ==========================================================
 def safe_llm_invoke(prompt: str, timeout: int = 30) -> str:
     start_time = time.time()
+    print("[DEBUG] OPENROUTER_API_KEY:", os.getenv("OPENROUTER_API_KEY"))
     if len(prompt) > 4000:
         prompt = prompt[:4000] + "... [truncated]"
 
