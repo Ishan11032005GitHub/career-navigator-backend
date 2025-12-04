@@ -7,7 +7,7 @@ ENV DEBIAN_FRONTEND=noninteractive \
     PYTHONUNBUFFERED=1 \
     PIP_NO_CACHE_DIR=1
 
-# ---------- System Setup ----------
+# ---------- System Dependencies ----------
 RUN apt-get update && \
     apt-get install -y --no-install-recommends \
         curl git build-essential wget \
@@ -16,29 +16,20 @@ RUN apt-get update && \
         tini && \
     rm -rf /var/lib/apt/lists/*
 
-# ---------- Install Ollama ----------
-RUN curl -fsSL https://ollama.com/install.sh | sh
-
 # ---------- Working Directory ----------
 WORKDIR /app
 
-# Install Python deps first for better layer caching
+# Install Python dependencies first
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
 # Copy the rest of the app
 COPY . .
 
-# Ensure start script is executable
-RUN chmod +x /app/start.sh
-
-# ---------- Expose Ports ----------
+# ---------- Expose Port ----------
 EXPOSE 8000
-EXPOSE 11434
 
-# ---------- Entrypoint + Command ----------
-# tini acts as PID 1 and forwards signals properly
+# ---------- Entrypoint + CMD ----------
 ENTRYPOINT ["/usr/bin/tini", "--"]
 
-# JSON-form CMD, no more shell-form nonsense
-CMD ["/app/start.sh"]
+CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8000"]
