@@ -1,12 +1,13 @@
 # models.py
 from pydantic import BaseModel
 from typing import List, Optional
+from typing import List, Dict, Any, Optional
 
 class ChatRequest(BaseModel):
     message: str
     thread_id: str = "default"
     resume_text: Optional[str] = None
-    job_posts: Optional[list] = None  # list of {title, company, requirements: []}
+    job_posts: Optional[List[Dict[str, Any]]] = None  # list of {title, company, requirements: []}
 
 class ChatResponse(BaseModel):
     reply: str

@@ -20,6 +20,8 @@ from auth import (
 from database import get_db
 from email_utils import send_email
 
+from pydantic import BaseModel, EmailStr
+
 # ==========================================================
 # LOGGING CONFIG
 # ==========================================================
@@ -50,7 +52,7 @@ app = FastAPI(title="Career Navigator AI")
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],  # replace with frontend domain in prod
-    allow_credentials=True,
+    allow_credentials=False,
     allow_methods=["*"],
     allow_headers=["*"],
 )
@@ -92,6 +94,14 @@ class SignupRequest(BaseModel):
 class LoginRequest(BaseModel):
     email: EmailStr
     password: str
+
+
+class ForgotRequest(BaseModel):
+    email: EmailStr
+
+class ResetRequest(BaseModel):
+    token: str
+    new_password: str
 
 
 # ==========================================================
@@ -196,6 +206,7 @@ async def log_requests(request: Request, call_next):
 # ==========================================================
 @app.get("/debug/db-check")
 async def debug_db_check():
+    conn = None
     try:
         conn = get_db()
         cur = conn.cursor()
@@ -203,10 +214,16 @@ async def debug_db_check():
         table_exists = cur.fetchone() is not None
         cur.execute("SELECT COUNT(*) FROM users")
         user_count = cur.fetchone()[0]
-        conn.close()
-        return {"database_connected": True, "learning_chat_history_exists": table_exists, "user_count": user_count}
+        return {
+            "database_connected": True,
+            "learning_chat_history_exists": table_exists,
+            "user_count": user_count,
+        }
     except Exception as e:
         return {"database_connected": False, "error": str(e)}
+    finally:
+        if conn:
+            conn.close()
 
 
 @app.get("/test-download")
@@ -278,38 +295,59 @@ def login(user: LoginRequest):
     conn.close()
     return {"token": token, "username": row["username"]}
 
-
 @app.post("/api/forgot")
-def forgot(user: dict):
-    email = user.get("email")
+def forgot(req: ForgotRequest):
+    email = req.email
+
     conn = get_db()
     cur = conn.cursor()
-    cur.execute("SELECT username, email FROM users WHERE email=?", (email,))
-    result = cur.fetchone()
-    if not result:
-        raise HTTPException(status_code=404, detail="If the email exists, a reset link has been sent.")
-    username, user_email = result
-    token = create_reset_token(user_email)
-    body = f"Hi {username},\n\nHere is your password reset token:\n{token}\n\n– Career Navigator AI"
     try:
-        send_email(user_email, "Career Navigator AI – Password Reset", body)
+        cur.execute("SELECT username, email FROM users WHERE email=?", (email,))
+        result = cur.fetchone()
+
+        # Always respond 200; only send email if user exists
+        if result:
+            username, user_email = result
+            token = create_reset_token(user_email)
+            body = (
+                f"Hi {username},\n\n"
+                f"Here is your password reset token:\n{token}\n\n"
+                f"– Career Navigator AI"
+            )
+            send_email(user_email, "Career Navigator AI – Password Reset", body)
+
+        return {"msg": "If the email exists, a reset link has been sent."}
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Email sending failed: {str(e)}")
-    return {"msg": "If the email exists, a reset link has been sent."}
+        logging.error(f"[FORGOT] error: {e}", exc_info=True)
+        # Optional: mask details in production
+        raise HTTPException(status_code=500, detail="Internal server error")
+    finally:
+        conn.close()
+
 
 
 @app.post("/api/reset")
-def reset(data: dict):
-    token, new_pass = data.get("token"), data.get("new_password")
-    email = verify_reset_token(token)
+def reset(data: ResetRequest):
+    email = verify_reset_token(data.token)
     if not email:
         raise HTTPException(status_code=400, detail="Invalid or expired token")
+
     conn = get_db()
-    cur = conn.cursor()
-    cur.execute("UPDATE users SET password=? WHERE email=?", (hash_password(new_pass), email))
-    conn.commit()
-    conn.close()
-    return {"msg": "Password updated successfully"}
+    try:
+        cur = conn.cursor()
+        cur.execute(
+            "UPDATE users SET password=? WHERE email=?",
+            (hash_password(data.new_password), email),
+        )
+        conn.commit()
+        return {"msg": "Password updated successfully"}
+    except Exception as e:
+        logging.error(f"[RESET] error: {e}", exc_info=True)
+        conn.rollback()
+        raise HTTPException(status_code=500, detail="Internal server error")
+    finally:
+        conn.close()
+
 
 
 # ==========================================================
@@ -333,17 +371,23 @@ def career(req: ChatRequest, user=Depends(verify_token)):
 async def learning(req: ChatRequest, user=Depends(verify_token)):
     try:
         logging.info(f"[LEARNING] Request from {user}")
-        loop = asyncio.get_event_loop()
+        loop = asyncio.get_running_loop()
+        payload = req.dict()
         result = await asyncio.wait_for(
-            loop.run_in_executor(executor, lambda: learning_agent(req.dict(), thread_id=req.thread_id)),
-            timeout=20.0
+            loop.run_in_executor(
+                executor,
+                lambda: learning_agent(payload, thread_id=payload.get("thread_id")),
+            ),
+            timeout=20.0,
         )
-        return ChatResponse(reply=result.get("reply", ""))
+        # learning_agent returns {"reply": ...}, so just unpack
+        return ChatResponse(**result)
     except asyncio.TimeoutError:
         raise HTTPException(status_code=504, detail="AI service timeout")
     except Exception as e:
-        logging.error(f"[LEARNING ERROR] {e}")
-        raise HTTPException(status_code=500, detail=str(e))
+        logging.error(f"[LEARNING ERROR] {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail="Internal server error")
+
 
 
 # ==========================================================
@@ -354,32 +398,45 @@ def save_learning_chat(chat: dict, user=Depends(verify_token)):
     message, reply = chat.get("message", "").strip(), chat.get("reply", "").strip()
     if not message or not reply:
         raise HTTPException(status_code=400, detail="Message and reply required")
+
     conn = get_db()
-    cur = conn.cursor()
-    cur.execute("SELECT id FROM users WHERE username=?", (user,))
-    row = cur.fetchone()
-    if not row:
-        raise HTTPException(status_code=404, detail="User not found")
-    cur.execute("INSERT INTO learning_chat_history (user_id, message, reply) VALUES (?, ?, ?)",
-                (row["id"], message, reply))
-    conn.commit()
-    conn.close()
-    return {"msg": "Learning chat saved successfully"}
+    try:
+        cur = conn.cursor()
+        cur.execute("SELECT id FROM users WHERE username=?", (user,))
+        row = cur.fetchone()
+        if not row:
+            raise HTTPException(status_code=404, detail="User not found")
+
+        cur.execute(
+            "INSERT INTO learning_chat_history (user_id, message, reply) VALUES (?, ?, ?)",
+            (row["id"], message, reply),
+        )
+        conn.commit()
+        return {"msg": "Learning chat saved successfully"}
+    finally:
+        conn.close()
+
 
 
 @app.get("/api/learning/chat/history")
 def get_learning_chat_history(user=Depends(verify_token)):
     conn = get_db()
-    cur = conn.cursor()
-    cur.execute("SELECT id FROM users WHERE username=?", (user,))
-    row = cur.fetchone()
-    if not row:
-        raise HTTPException(status_code=404, detail="User not found")
-    cur.execute("SELECT id, message, reply, timestamp FROM learning_chat_history WHERE user_id=? ORDER BY timestamp DESC",
-                (row["id"],))
-    data = cur.fetchall()
-    conn.close()
-    return {"history": [dict(r) for r in data]}
+    try:
+        cur = conn.cursor()
+        cur.execute("SELECT id FROM users WHERE username=?", (user,))
+        row = cur.fetchone()
+        if not row:
+            raise HTTPException(status_code=404, detail="User not found")
+
+        cur.execute(
+            "SELECT id, message, reply, timestamp "
+            "FROM learning_chat_history WHERE user_id=? ORDER BY timestamp DESC",
+            (row["id"],),
+        )
+        data = cur.fetchall()
+        return {"history": [dict(r) for r in data]}
+    finally:
+        conn.close()
 
 
 @app.delete("/api/learning/chat/clear")
