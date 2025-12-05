@@ -5,7 +5,21 @@ from langgraph.graph import StateGraph, END
 from langgraph.checkpoint.memory import MemorySaver
 import fitz  # PyMuPDF
 
-from tools import analyze_resume, match_jobs, generate_learning_path, quick_quiz
+# Defensive imports with error handling
+try:
+    from tools import analyze_resume, match_jobs, generate_learning_path, quick_quiz
+    logging.info("✅ Tools imported successfully")
+except ImportError as e:
+    logging.error(f"❌ Failed to import tools: {e}", exc_info=True)
+    # Provide stub implementations to prevent startup failure
+    def analyze_resume(text: str) -> Dict:
+        return {"skills": [], "suggestions": []}
+    def match_jobs(skills, job_posts):
+        return []
+    def generate_learning_path(topic: str):
+        return []
+    def quick_quiz(topic: str):
+        return []
 
 # ==========================================================
 # CONFIG

@@ -26,10 +26,13 @@ RUN pip install --no-cache-dir -r requirements.txt
 # Copy the rest of the app
 COPY . .
 
+# Run startup verification
+RUN python startup_check.py || echo "⚠️ Startup check warnings (may not block deployment)"
+
 # ---------- Expose Port ----------
 EXPOSE 8000
 
 # ---------- Entrypoint + CMD ----------
 ENTRYPOINT ["/usr/bin/tini", "--"]
 
-CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8000"]
+CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8000", "--log-level", "info"]

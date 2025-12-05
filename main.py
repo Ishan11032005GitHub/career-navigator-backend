@@ -10,15 +10,47 @@ from pydantic import BaseModel, EmailStr
 from dotenv import load_dotenv
 
 # Internal modules
-from models import ChatRequest, ChatResponse
-from graph import career_agent, learning_agent
-from auth import (
-    create_token, verify_token,
-    hash_password, verify_password,
-    create_reset_token, verify_reset_token
-)
-from database import get_db
-from email_utils import send_email
+try:
+    from models import ChatRequest, ChatResponse
+    from auth import (
+        create_token, verify_token,
+        hash_password, verify_password,
+        create_reset_token, verify_reset_token
+    )
+    from database import get_db
+    from email_utils import send_email
+    logging.info("✅ Core modules imported successfully")
+except Exception as e:
+    logging.error(f"❌ Failed to import core modules: {e}", exc_info=True)
+    raise
+
+# Lazy import graph agents to prevent startup failure
+_career_agent = None
+_learning_agent = None
+
+def get_career_agent():
+    global _career_agent
+    if _career_agent is None:
+        try:
+            from graph import career_agent
+            _career_agent = career_agent
+            logging.info("✅ Career agent imported successfully")
+        except Exception as e:
+            logging.error(f"❌ Failed to import career_agent: {e}", exc_info=True)
+            raise
+    return _career_agent
+
+def get_learning_agent():
+    global _learning_agent
+    if _learning_agent is None:
+        try:
+            from graph import learning_agent
+            _learning_agent = learning_agent
+            logging.info("✅ Learning agent imported successfully")
+        except Exception as e:
+            logging.error(f"❌ Failed to import learning_agent: {e}", exc_info=True)
+            raise
+    return _learning_agent
 
 # ==========================================================
 # LOGGING CONFIG
@@ -358,22 +390,30 @@ def reset(data: ResetRequest):
 # ==========================================================
 @app.post("/api/career", response_model=ChatResponse)
 def career(req: ChatRequest, user=Depends(verify_token)):
-    data = req.dict()
-    resume_text = data.get("resume_text", "").strip()
-    if not resume_text:
-        raise HTTPException(status_code=400, detail="No resume text provided")
-    result = career_agent({
-        "message": data.get("message"),
-        "resume_text": resume_text,
-        "job_posts": data.get("job_posts", [])
-    })
-    return ChatResponse(**result)
+    try:
+        career_agent = get_career_agent()
+        data = req.dict()
+        resume_text = data.get("resume_text", "").strip()
+        if not resume_text:
+            raise HTTPException(status_code=400, detail="No resume text provided")
+        result = career_agent({
+            "message": data.get("message"),
+            "resume_text": resume_text,
+            "job_posts": data.get("job_posts", [])
+        })
+        return ChatResponse(**result)
+    except HTTPException:
+        raise
+    except Exception as e:
+        logging.error(f"[CAREER] Error: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail="Career agent error")
 
 
 @app.post("/api/learning", response_model=ChatResponse)
 async def learning(req: ChatRequest, user=Depends(verify_token)):
     try:
         logging.info(f"[LEARNING] Request from {user}")
+        learning_agent = get_learning_agent()
         loop = asyncio.get_running_loop()
         payload = req.dict()
         result = await asyncio.wait_for(
@@ -383,13 +423,14 @@ async def learning(req: ChatRequest, user=Depends(verify_token)):
             ),
             timeout=20.0,
         )
-        # learning_agent returns {"reply": ...}, so just unpack
         return ChatResponse(**result)
     except asyncio.TimeoutError:
         raise HTTPException(status_code=504, detail="AI service timeout")
+    except HTTPException:
+        raise
     except Exception as e:
         logging.error(f"[LEARNING ERROR] {e}", exc_info=True)
-        raise HTTPException(status_code=500, detail="Internal server error")
+        raise HTTPException(status_code=500, detail="Learning agent error")
 
 
 
@@ -477,7 +518,51 @@ def clear_learning_chat_history(user=Depends(verify_token)):
 # ==========================================================
 @app.get("/health")
 def health_check():
-    return {"status": "healthy"}
+    """Basic health check - returns quickly if app is running"""
+    return {"status": "healthy", "message": "API is running"}
+
+
+@app.get("/health/detailed")
+def detailed_health_check():
+    """Comprehensive health check including all imports and database"""
+    status = {
+        "status": "healthy",
+        "database": "error",
+        "career_agent": "error",
+        "learning_agent": "error"
+    }
+    
+    # Check database
+    try:
+        conn = get_db()
+        conn.close()
+        status["database"] = "ok"
+    except Exception as e:
+        logging.error(f"Database check failed: {e}")
+        status["database"] = str(e)
+    
+    # Check career agent import
+    try:
+        get_career_agent()
+        status["career_agent"] = "ok"
+    except Exception as e:
+        logging.error(f"Career agent check failed: {e}")
+        status["career_agent"] = str(e)
+    
+    # Check learning agent import
+    try:
+        get_learning_agent()
+        status["learning_agent"] = "ok"
+    except Exception as e:
+        logging.error(f"Learning agent check failed: {e}")
+        status["learning_agent"] = str(e)
+    
+    # Overall status
+    all_ok = all(v == "ok" for v in status.values() if v != "healthy")
+    if not all_ok:
+        status["status"] = "degraded"
+    
+    return status
 
 
 @app.get("/")
