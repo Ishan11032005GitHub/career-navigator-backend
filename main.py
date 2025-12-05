@@ -1,7 +1,12 @@
-import os, asyncio, time, logging, sqlite3
+import os
+import asyncio
+import time
+import logging
+import sqlite3
 from concurrent.futures import ThreadPoolExecutor
+
 from fastapi import (
-    FastAPI, HTTPException, Depends, UploadFile, File, Request
+    FastAPI, HTTPException, Depends, Request
 )
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
@@ -9,7 +14,45 @@ from fastapi.responses import FileResponse
 from pydantic import BaseModel, EmailStr
 from dotenv import load_dotenv
 
-# Internal modules
+# ==========================================================
+# LOGGING CONFIG
+# ==========================================================
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s - %(levelname)s - %(message)s",
+    handlers=[logging.StreamHandler()]
+)
+
+# ==========================================================
+# ENV + PATHS
+# ==========================================================
+load_dotenv()
+
+# Base data root (single source of truth)
+if os.name == "nt":
+    DEFAULT_DATA_ROOT = r"C:\career_ai_data"
+else:
+    DEFAULT_DATA_ROOT = "/app/data"
+
+DATA_ROOT = os.path.abspath(os.getenv("DATA_ROOT", DEFAULT_DATA_ROOT))
+DB_PATH = os.path.join(DATA_ROOT, "career_ai.db")
+
+# Ensure base data directory exists
+os.makedirs(DATA_ROOT, exist_ok=True)
+
+# MiKTeX only on Windows
+if os.name == "nt":
+    miktex_path = r"C:\Program Files\MiKTeX\miktex\bin\x64"
+    path_env = os.environ.get("PATH", "")
+    if miktex_path not in path_env:
+        os.environ["PATH"] = miktex_path + os.pathsep + path_env
+    print("[INFO] MiKTeX path added to PATH:", miktex_path)
+else:
+    print("[INFO] Running on Linux container — skipping MiKTeX PATH setup.")
+
+# ==========================================================
+# INTERNAL MODULES
+# ==========================================================
 try:
     from models import ChatRequest, ChatResponse
     from auth import (
@@ -28,6 +71,7 @@ except Exception as e:
 _career_agent = None
 _learning_agent = None
 
+
 def get_career_agent():
     global _career_agent
     if _career_agent is None:
@@ -39,6 +83,7 @@ def get_career_agent():
             logging.error(f"❌ Failed to import career_agent: {e}", exc_info=True)
             raise
     return _career_agent
+
 
 def get_learning_agent():
     global _learning_agent
@@ -52,37 +97,28 @@ def get_learning_agent():
             raise
     return _learning_agent
 
-# ==========================================================
-# LOGGING CONFIG
-# ==========================================================
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s - %(levelname)s - %(message)s",
-    handlers=[logging.StreamHandler()]
-)
-
-# ==========================================================
-# ENV + PATHS
-# ==========================================================
-load_dotenv()
-
-if os.name == "nt":
-    miktex_path = r"C:\Program Files\MiKTeX\miktex\bin\x64"
-    if miktex_path not in os.environ["PATH"]:
-        os.environ["PATH"] = miktex_path + os.pathsep + os.environ["PATH"]
-    print("[INFO] MiKTeX path added to PATH:", miktex_path)
-else:
-    print("[INFO] Running on Linux container — skipping MiKTeX PATH setup.")
 
 # ==========================================================
 # APP INIT
 # ==========================================================
 app = FastAPI(title="Career Navigator AI")
 
+# CORS: allow GitHub Pages + localhost by default, override via env
+default_origins = [
+    "https://ishan11032005github.github.io",
+    "http://localhost:5173",
+    "http://127.0.0.1:5173",
+]
+env_origins = os.getenv("FRONTEND_ORIGINS")
+if env_origins:
+    allow_origins = [o.strip() for o in env_origins.split(",") if o.strip()]
+else:
+    allow_origins = default_origins
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  # replace with frontend domain in prod
-    allow_credentials=False,
+    allow_origins=allow_origins,
+    allow_credentials=True,          # allow Authorization header + cookies if needed
     allow_methods=["*"],
     allow_headers=["*"],
 )
@@ -90,11 +126,6 @@ app.add_middleware(
 # ==========================================================
 # DIRECTORIES
 # ==========================================================
-if os.name == "nt":
-    DATA_ROOT = os.path.abspath(r"C:\career_ai_data")
-else:
-    DATA_ROOT = os.path.abspath("/app/data")
-
 UPLOAD_DIR = os.path.join(DATA_ROOT, "uploads")
 GENERATED_DIR = os.path.join(DATA_ROOT, "generated_resumes")
 
@@ -106,11 +137,13 @@ app.mount("/generated_resumes", StaticFiles(directory=GENERATED_DIR), name="gene
 
 print(f"📂 Serving uploads from: {UPLOAD_DIR}")
 print(f"📄 Serving generated resumes from: {GENERATED_DIR}")
+print(f"🗄️ Using database at: {DB_PATH}")
 
 # ==========================================================
-# EXECUTOR POOL (moved to top to avoid runtime errors)
+# EXECUTOR POOL
 # ==========================================================
-executor = ThreadPoolExecutor(max_workers=3)
+# Increase workers a bit for concurrent /api/learning usage
+executor = ThreadPoolExecutor(max_workers=10)
 
 # ==========================================================
 # MODELS
@@ -129,6 +162,7 @@ class LoginRequest(BaseModel):
 class ForgotRequest(BaseModel):
     email: EmailStr
 
+
 class ResetRequest(BaseModel):
     token: str
     new_password: str
@@ -138,15 +172,19 @@ class ResetRequest(BaseModel):
 # DATABASE INITIALIZATION
 # ==========================================================
 def init_database():
-    if os.name == "nt":
-        db_path = os.path.join(r"C:\career_ai_data", "career_ai.db")
-    else:
-        db_path = os.path.join("/app/data", "career_ai.db")
+    """
+    Single source of truth DB init using DB_PATH.
+    Also enables WAL and foreign keys for better robustness.
+    """
+    os.makedirs(os.path.dirname(DB_PATH), exist_ok=True)
+    db_exists = os.path.exists(DB_PATH)
 
-    os.makedirs(os.path.dirname(db_path), exist_ok=True)
-    db_exists = os.path.exists(db_path)
-    conn = sqlite3.connect(db_path, check_same_thread=False)
+    conn = sqlite3.connect(DB_PATH, check_same_thread=False, timeout=30.0)
     cur = conn.cursor()
+
+    # Basic tuning for concurrency + integrity
+    cur.execute("PRAGMA journal_mode=WAL;")
+    cur.execute("PRAGMA foreign_keys=ON;")
 
     cur.executescript("""
     CREATE TABLE IF NOT EXISTS users (
@@ -209,7 +247,7 @@ def init_database():
 
     conn.commit()
     conn.close()
-    print(f"✅ Database ready at {db_path}" if db_exists else f"🆕 Created DB at {db_path}")
+    print(f"✅ Database ready at {DB_PATH}" if db_exists else f"🆕 Created DB at {DB_PATH}")
 
 
 @app.on_event("startup")
@@ -225,10 +263,26 @@ async def startup_event():
 @app.middleware("http")
 async def log_requests(request: Request, call_next):
     start = time.time()
-    response = await call_next(request)
+    try:
+        response = await call_next(request)
+    except Exception as e:
+        logging.error(f"[UNHANDLED ERROR] {request.method} {request.url.path}: {e}", exc_info=True)
+        raise
     duration = time.time() - start
     logging.info(f"{request.method} {request.url.path} → {response.status_code} ({duration:.2f}s)")
     return response
+
+
+# ==========================================================
+# DEBUG HELPER
+# ==========================================================
+def assert_debug_enabled():
+    """
+    Protects debug endpoints from being exposed in production.
+    Set DEBUG_ROUTES_ENABLED=true in env to use them.
+    """
+    if os.getenv("DEBUG_ROUTES_ENABLED", "false").lower() != "true":
+        raise HTTPException(status_code=404, detail="Not found")
 
 
 # ==========================================================
@@ -236,6 +290,7 @@ async def log_requests(request: Request, call_next):
 # ==========================================================
 @app.get("/debug/db-check")
 async def debug_db_check():
+    assert_debug_enabled()
     conn = None
     try:
         conn = get_db()
@@ -250,6 +305,7 @@ async def debug_db_check():
             "user_count": user_count,
         }
     except Exception as e:
+        logging.error(f"[DEBUG DB CHECK] error: {e}", exc_info=True)
         return {"database_connected": False, "error": str(e)}
     finally:
         if conn:
@@ -258,6 +314,7 @@ async def debug_db_check():
 
 @app.get("/test-download")
 async def test_download():
+    assert_debug_enabled()
     import fitz
     test_filename = "test_resume.pdf"
     test_path = os.path.join(GENERATED_DIR, test_filename)
@@ -279,16 +336,16 @@ async def test_download():
 # ==========================================================
 @app.get("/download-pdf/{filename}")
 async def download_pdf(filename: str):
-    filename = os.path.basename(filename)
-    file_path = os.path.join(GENERATED_DIR, filename)
-    if not os.path.exists(file_path):
+    safe_name = os.path.basename(filename)
+    file_path = os.path.join(GENERATED_DIR, safe_name)
+
+    if not os.path.isfile(file_path):
         raise HTTPException(status_code=404, detail="File not found")
-    if not file_path.startswith(GENERATED_DIR):
-        raise HTTPException(status_code=403, detail="Access denied")
+
     return FileResponse(
         file_path,
         media_type="application/pdf",
-        filename=filename,
+        filename=safe_name,
         headers={"Access-Control-Expose-Headers": "Content-Disposition"}
     )
 
@@ -298,15 +355,29 @@ async def download_pdf(filename: str):
 # ==========================================================
 @app.post("/api/signup")
 def signup(user: SignupRequest):
+    email = user.email.strip().lower()
+    username = user.username.strip()
+    password = user.password
+
+    if not username or not password:
+        raise HTTPException(status_code=400, detail="Username and password are required")
+
+    if len(password) < 6:
+        raise HTTPException(status_code=400, detail="Password must be at least 6 characters")
+
     conn = get_db()
     try:
         cur = conn.cursor()
-        cur.execute("INSERT INTO users (email, username, password) VALUES (?, ?, ?)",
-                    (user.email, user.username, hash_password(user.password)))
+        cur.execute(
+            "INSERT INTO users (email, username, password) VALUES (?, ?, ?)",
+            (email, username, hash_password(password)),
+        )
         conn.commit()
         return {"msg": "Signup successful"}
-    except sqlite3.IntegrityError:
+    except sqlite3.IntegrityError as e:
         conn.rollback()
+        logging.warning(f"[SIGNUP] Integrity error: {e}")
+        # Could be email or username; don't leak which one
         raise HTTPException(status_code=409, detail="Email or username already exists")
     except Exception as e:
         conn.rollback()
@@ -318,22 +389,36 @@ def signup(user: SignupRequest):
 
 @app.post("/api/login")
 def login(user: LoginRequest):
+    email = user.email.strip().lower()
+    password = user.password
+
+    if not password:
+        raise HTTPException(status_code=400, detail="Password is required")
+
     conn = get_db()
     conn.row_factory = sqlite3.Row
     try:
         cur = conn.cursor()
-        cur.execute("SELECT * FROM users WHERE email=?", (user.email,))
+        cur.execute("SELECT * FROM users WHERE email=?", (email,))
         row = cur.fetchone()
-        if not row or not verify_password(user.password, row["password"]):
+        if not row or not verify_password(password, row["password"]):
+            # Don't leak which part is wrong
             raise HTTPException(status_code=401, detail="Invalid credentials")
+
         token = create_token(row["username"])
         return {"token": token, "username": row["username"]}
+    except HTTPException:
+        raise
+    except Exception as e:
+        logging.error(f"[LOGIN] error: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail="Internal server error")
     finally:
         conn.close()
 
+
 @app.post("/api/forgot")
 def forgot(req: ForgotRequest):
-    email = req.email
+    email = req.email.strip().lower()
     conn = get_db()
     conn.row_factory = sqlite3.Row
     try:
@@ -360,29 +445,36 @@ def forgot(req: ForgotRequest):
         conn.close()
 
 
-
 @app.post("/api/reset")
 def reset(data: ResetRequest):
     email = verify_reset_token(data.token)
     if not email:
         raise HTTPException(status_code=400, detail="Invalid or expired token")
 
+    new_password = data.new_password
+    if len(new_password) < 6:
+        raise HTTPException(status_code=400, detail="Password must be at least 6 characters")
+
     conn = get_db()
     try:
         cur = conn.cursor()
         cur.execute(
             "UPDATE users SET password=? WHERE email=?",
-            (hash_password(data.new_password), email),
+            (hash_password(new_password), email.strip().lower()),
         )
+        if cur.rowcount == 0:
+            raise HTTPException(status_code=404, detail="User not found")
         conn.commit()
         return {"msg": "Password updated successfully"}
+    except HTTPException:
+        conn.rollback()
+        raise
     except Exception as e:
         logging.error(f"[RESET] error: {e}", exc_info=True)
         conn.rollback()
         raise HTTPException(status_code=500, detail="Internal server error")
     finally:
         conn.close()
-
 
 
 # ==========================================================
@@ -421,17 +513,17 @@ async def learning(req: ChatRequest, user=Depends(verify_token)):
                 executor,
                 lambda: learning_agent(payload, thread_id=payload.get("thread_id")),
             ),
-            timeout=20.0,
+            timeout=60.0,  # more realistic timeout for heavy calls
         )
         return ChatResponse(**result)
     except asyncio.TimeoutError:
+        logging.error("[LEARNING] Timeout")
         raise HTTPException(status_code=504, detail="AI service timeout")
     except HTTPException:
         raise
     except Exception as e:
         logging.error(f"[LEARNING ERROR] {e}", exc_info=True)
         raise HTTPException(status_code=500, detail="Learning agent error")
-
 
 
 # ==========================================================
@@ -458,13 +550,15 @@ def save_learning_chat(chat: dict, user=Depends(verify_token)):
         )
         conn.commit()
         return {"msg": "Learning chat saved successfully"}
+    except HTTPException:
+        conn.rollback()
+        raise
     except Exception as e:
         logging.error(f"[SAVE CHAT] error: {e}", exc_info=True)
         conn.rollback()
         raise HTTPException(status_code=500, detail="Internal server error")
     finally:
         conn.close()
-
 
 
 @app.get("/api/learning/chat/history")
@@ -505,6 +599,9 @@ def clear_learning_chat_history(user=Depends(verify_token)):
         cur.execute("DELETE FROM learning_chat_history WHERE user_id=?", (row["id"],))
         conn.commit()
         return {"msg": "All learning chat history cleared"}
+    except HTTPException:
+        conn.rollback()
+        raise
     except Exception as e:
         logging.error(f"[CLEAR CHAT] error: {e}", exc_info=True)
         conn.rollback()
@@ -531,7 +628,7 @@ def detailed_health_check():
         "career_agent": "error",
         "learning_agent": "error"
     }
-    
+
     # Check database
     try:
         conn = get_db()
@@ -540,7 +637,7 @@ def detailed_health_check():
     except Exception as e:
         logging.error(f"Database check failed: {e}")
         status["database"] = str(e)
-    
+
     # Check career agent import
     try:
         get_career_agent()
@@ -548,7 +645,7 @@ def detailed_health_check():
     except Exception as e:
         logging.error(f"Career agent check failed: {e}")
         status["career_agent"] = str(e)
-    
+
     # Check learning agent import
     try:
         get_learning_agent()
@@ -556,12 +653,14 @@ def detailed_health_check():
     except Exception as e:
         logging.error(f"Learning agent check failed: {e}")
         status["learning_agent"] = str(e)
-    
-    # Overall status
-    all_ok = all(v == "ok" for v in status.values() if v != "healthy")
+
+    all_ok = all(
+        status[key] == "ok"
+        for key in ("database", "career_agent", "learning_agent")
+    )
     if not all_ok:
         status["status"] = "degraded"
-    
+
     return status
 
 
