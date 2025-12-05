@@ -1,7 +1,7 @@
-import os, shutil, asyncio, time, logging, sqlite3
+import os, asyncio, time, logging, sqlite3
 from concurrent.futures import ThreadPoolExecutor
 from fastapi import (
-    FastAPI, HTTPException, Depends, Form, UploadFile, File, Request
+    FastAPI, HTTPException, Depends, UploadFile, File, Request
 )
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
@@ -19,8 +19,6 @@ from auth import (
 )
 from database import get_db
 from email_utils import send_email
-
-from pydantic import BaseModel, EmailStr
 
 # ==========================================================
 # LOGGING CONFIG
@@ -269,15 +267,19 @@ async def download_pdf(filename: str):
 @app.post("/api/signup")
 def signup(user: SignupRequest):
     conn = get_db()
-    cur = conn.cursor()
     try:
+        cur = conn.cursor()
         cur.execute("INSERT INTO users (email, username, password) VALUES (?, ?, ?)",
                     (user.email, user.username, hash_password(user.password)))
         conn.commit()
         return {"msg": "Signup successful"}
+    except sqlite3.IntegrityError:
+        conn.rollback()
+        raise HTTPException(status_code=409, detail="Email or username already exists")
     except Exception as e:
         conn.rollback()
-        raise HTTPException(status_code=500, detail=str(e))
+        logging.error(f"[SIGNUP] error: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail="Internal server error")
     finally:
         conn.close()
 
@@ -285,29 +287,31 @@ def signup(user: SignupRequest):
 @app.post("/api/login")
 def login(user: LoginRequest):
     conn = get_db()
-    cur = conn.cursor()
-    cur.execute("SELECT * FROM users WHERE email=?", (user.email,))
-    row = cur.fetchone()
-    if not row or not verify_password(user.password, row["password"]):
+    conn.row_factory = sqlite3.Row
+    try:
+        cur = conn.cursor()
+        cur.execute("SELECT * FROM users WHERE email=?", (user.email,))
+        row = cur.fetchone()
+        if not row or not verify_password(user.password, row["password"]):
+            raise HTTPException(status_code=401, detail="Invalid credentials")
+        token = create_token(row["username"])
+        return {"token": token, "username": row["username"]}
+    finally:
         conn.close()
-        raise HTTPException(status_code=401, detail="Invalid credentials")
-    token = create_token(row["username"])
-    conn.close()
-    return {"token": token, "username": row["username"]}
 
 @app.post("/api/forgot")
 def forgot(req: ForgotRequest):
     email = req.email
-
     conn = get_db()
-    cur = conn.cursor()
+    conn.row_factory = sqlite3.Row
     try:
+        cur = conn.cursor()
         cur.execute("SELECT username, email FROM users WHERE email=?", (email,))
         result = cur.fetchone()
 
         # Always respond 200; only send email if user exists
         if result:
-            username, user_email = result
+            username, user_email = result["username"], result["email"]
             token = create_reset_token(user_email)
             body = (
                 f"Hi {username},\n\n"
@@ -319,7 +323,6 @@ def forgot(req: ForgotRequest):
         return {"msg": "If the email exists, a reset link has been sent."}
     except Exception as e:
         logging.error(f"[FORGOT] error: {e}", exc_info=True)
-        # Optional: mask details in production
         raise HTTPException(status_code=500, detail="Internal server error")
     finally:
         conn.close()
@@ -400,6 +403,7 @@ def save_learning_chat(chat: dict, user=Depends(verify_token)):
         raise HTTPException(status_code=400, detail="Message and reply required")
 
     conn = get_db()
+    conn.row_factory = sqlite3.Row
     try:
         cur = conn.cursor()
         cur.execute("SELECT id FROM users WHERE username=?", (user,))
@@ -413,6 +417,10 @@ def save_learning_chat(chat: dict, user=Depends(verify_token)):
         )
         conn.commit()
         return {"msg": "Learning chat saved successfully"}
+    except Exception as e:
+        logging.error(f"[SAVE CHAT] error: {e}", exc_info=True)
+        conn.rollback()
+        raise HTTPException(status_code=500, detail="Internal server error")
     finally:
         conn.close()
 
@@ -421,6 +429,7 @@ def save_learning_chat(chat: dict, user=Depends(verify_token)):
 @app.get("/api/learning/chat/history")
 def get_learning_chat_history(user=Depends(verify_token)):
     conn = get_db()
+    conn.row_factory = sqlite3.Row
     try:
         cur = conn.cursor()
         cur.execute("SELECT id FROM users WHERE username=?", (user,))
@@ -435,6 +444,9 @@ def get_learning_chat_history(user=Depends(verify_token)):
         )
         data = cur.fetchall()
         return {"history": [dict(r) for r in data]}
+    except Exception as e:
+        logging.error(f"[GET CHAT HISTORY] error: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail="Internal server error")
     finally:
         conn.close()
 
@@ -442,15 +454,22 @@ def get_learning_chat_history(user=Depends(verify_token)):
 @app.delete("/api/learning/chat/clear")
 def clear_learning_chat_history(user=Depends(verify_token)):
     conn = get_db()
-    cur = conn.cursor()
-    cur.execute("SELECT id FROM users WHERE username=?", (user,))
-    row = cur.fetchone()
-    if not row:
-        raise HTTPException(status_code=404, detail="User not found")
-    cur.execute("DELETE FROM learning_chat_history WHERE user_id=?", (row["id"],))
-    conn.commit()
-    conn.close()
-    return {"msg": "All learning chat history cleared"}
+    conn.row_factory = sqlite3.Row
+    try:
+        cur = conn.cursor()
+        cur.execute("SELECT id FROM users WHERE username=?", (user,))
+        row = cur.fetchone()
+        if not row:
+            raise HTTPException(status_code=404, detail="User not found")
+        cur.execute("DELETE FROM learning_chat_history WHERE user_id=?", (row["id"],))
+        conn.commit()
+        return {"msg": "All learning chat history cleared"}
+    except Exception as e:
+        logging.error(f"[CLEAR CHAT] error: {e}", exc_info=True)
+        conn.rollback()
+        raise HTTPException(status_code=500, detail="Internal server error")
+    finally:
+        conn.close()
 
 
 # ==========================================================

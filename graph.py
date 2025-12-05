@@ -54,46 +54,65 @@ def safe_llm_invoke(prompt: str, timeout: int = 30) -> str:
     if len(prompt) > 4000:
         prompt = prompt[:4000] + "... [truncated]"
 
+    # Try OpenRouter
     try:
-        logging.info("[LLM] Sending prompt to OpenRouter")
-        response = requests.post(
-            "https://openrouter.ai/api/v1/chat/completions",
-            headers={
-                "Authorization": f"Bearer {os.getenv('OPENROUTER_API_KEY', '')}",
-                "Content-Type": "application/json"
-            },
-            json={
-                "model": "openai/gpt-4o",
-                "messages": [{"role": "user", "content": prompt}],
-                "max_tokens": 500,
-                "temperature": 0.7
-            },
-            timeout=timeout
-        )
-        if response.status_code == 200:
-            data = response.json()
-            text = data["choices"][0]["message"]["content"].strip()
-            logging.info(f"[LLM] Response in {time.time() - start_time:.2f}s")
-            return text
+        openrouter_key = os.getenv('OPENROUTER_API_KEY', '').strip()
+        if not openrouter_key:
+            logging.warning("[LLM] OPENROUTER_API_KEY not configured")
+        else:
+            logging.info("[LLM] Sending prompt to OpenRouter")
+            response = requests.post(
+                "https://openrouter.ai/api/v1/chat/completions",
+                headers={
+                    "Authorization": f"Bearer {openrouter_key}",
+                    "Content-Type": "application/json"
+                },
+                json={
+                    "model": "openai/gpt-4o",
+                    "messages": [{"role": "user", "content": prompt}],
+                    "max_tokens": 500,
+                    "temperature": 0.7
+                },
+                timeout=timeout
+            )
+            if response.status_code == 200:
+                data = response.json()
+                if "choices" in data and data["choices"]:
+                    text = data["choices"][0]["message"]["content"].strip()
+                    if text:
+                        logging.info(f"[LLM] OpenRouter response in {time.time() - start_time:.2f}s")
+                        return text
+            else:
+                logging.warning(f"[LLM] OpenRouter returned status {response.status_code}: {response.text[:200]}")
     except Exception as e:
-        logging.warning(f"[LLM] OpenRouter failed: {e}")
+        logging.error(f"[LLM] OpenRouter failed: {e}", exc_info=True)
 
+    # Try Hugging Face
     try:
-        HF_API_KEY = os.getenv("HF_API_KEY", "")
-        if HF_API_KEY:
+        hf_key = os.getenv("HF_API_KEY", "").strip()
+        if not hf_key:
+            logging.warning("[LLM] HF_API_KEY not configured")
+        else:
+            logging.info("[LLM] Falling back to Hugging Face")
             response = requests.post(
                 "https://api-inference.huggingface.co/models/google/gemma-2-2b-it",
-                headers={"Authorization": f"Bearer {HF_API_KEY}"},
+                headers={"Authorization": f"Bearer {hf_key}"},
                 json={"inputs": prompt},
                 timeout=timeout
             )
             if response.status_code == 200:
                 result = response.json()
                 if isinstance(result, list) and result and "generated_text" in result[0]:
-                    return result[0]["generated_text"].replace(prompt, "").strip()
+                    text = result[0]["generated_text"].replace(prompt, "").strip()
+                    if text:
+                        logging.info(f"[LLM] HF response in {time.time() - start_time:.2f}s")
+                        return text
+            else:
+                logging.warning(f"[LLM] HF returned status {response.status_code}: {response.text[:200]}")
     except Exception as e:
-        logging.warning(f"[LLM] HF inference failed: {e}")
+        logging.error(f"[LLM] HF inference failed: {e}", exc_info=True)
 
+    logging.error("[LLM] All LLM providers failed, using fallback response")
     return enhanced_fallback_response(prompt)
 
 
@@ -295,8 +314,8 @@ Write a short actionable reply."""
 def learning_agent(state: Dict[str, Any], thread_id: str = "default"):
     start = time.time()
     thread = state.get("thread_id") or thread_id
-    topic = state.get("message", "")
-    if not topic.strip():
+    topic = state.get("message", "").strip()
+    if not topic:
         return {"reply": "Please provide a topic or question to learn about."}
 
     history = memory_store.get(thread, [])
@@ -306,9 +325,14 @@ Previous:
 {context}
 Question: "{topic}"
 Answer briefly (under 300 words) with clear explanations and actionable steps."""
+    
     reply = safe_llm_invoke(prompt, timeout=15)
-    if not reply.strip():
-        reply = "I couldn't generate a response. Try rephrasing your question."
+    
+    # Validate response before returning
+    if not reply or not reply.strip():
+        logging.error(f"[LEARNING_AGENT] Empty response received for topic: {topic}")
+        reply = f"I couldn't generate a detailed response for '{topic}'. Please try rephrasing your question or provide more context."
+    
     memory_store.append(thread, f"User: {topic}\nAssistant: {reply}")
     logging.info(f"[LEARNING_AGENT] Completed in {time.time()-start:.2f}s")
     return {"reply": reply.strip()}
@@ -317,9 +341,17 @@ Answer briefly (under 300 words) with clear explanations and actionable steps.""
 # CHITCHAT
 # ==========================================================
 def chitchat(state: Dict[str, Any]):
-    msg = state.get("message", "")
+    msg = state.get("message", "").strip()
+    if not msg:
+        return {"reply": "I didn't catch that. Please provide a message."}
+    
     r = safe_llm_invoke(f"Answer conversationally and helpfully: {msg}", timeout=10)
-    return {"reply": r or "I didn't catch that, please try again."}
+    
+    if not r or not r.strip():
+        logging.error(f"[CHITCHAT] Empty response received for message: {msg}")
+        return {"reply": "I'm having trouble processing that. Could you please rephrase your question?"}
+    
+    return {"reply": r.strip()}
 
 # ==========================================================
 # GRAPH BUILD
