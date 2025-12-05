@@ -104,11 +104,7 @@ def get_learning_agent():
 app = FastAPI(title="Career Navigator AI")
 
 # CORS: allow GitHub Pages + localhost by default, override via env
-default_origins = [
-    "https://ishan11032005github.github.io",
-    "http://localhost:5173",
-    "http://127.0.0.1:5173",
-]
+default_origins = ["*"]
 env_origins = os.getenv("FRONTEND_ORIGINS")
 if env_origins:
     allow_origins = [o.strip() for o in env_origins.split(",") if o.strip()]
@@ -118,7 +114,7 @@ else:
 app.add_middleware(
     CORSMiddleware,
     allow_origins=allow_origins,
-    allow_credentials=True,          # allow Authorization header + cookies if needed
+    allow_credentials=False,          # allow Authorization header + cookies if needed
     allow_methods=["*"],
     allow_headers=["*"],
 )
