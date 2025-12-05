@@ -311,6 +311,37 @@ async def debug_db_check():
         if conn:
             conn.close()
 
+@app.get("/debug/db-schema")
+async def debug_db_schema():
+    assert_debug_enabled()
+    conn = None
+    try:
+        conn = get_db()
+        cur = conn.cursor()
+
+        cur.execute("SELECT name FROM sqlite_master WHERE type='table'")
+        tables = [row[0] for row in cur.fetchall()]
+
+        result = {"tables": tables}
+
+        # Check if users table schema matches what we expect
+        if "users" in tables:
+            cur.execute("PRAGMA table_info(users)")
+            result["users_columns"] = [
+                {"cid": r[0], "name": r[1], "type": r[2], "notnull": r[3], "dflt": r[4], "pk": r[5]}
+                for r in cur.fetchall()
+            ]
+        else:
+            result["users_columns"] = "users table NOT FOUND"
+
+        return result
+    except Exception as e:
+        logging.error(f"[DEBUG DB SCHEMA] error: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=str(e))
+    finally:
+        if conn:
+            conn.close()
+
 
 @app.get("/test-download")
 async def test_download():
@@ -365,26 +396,43 @@ def signup(user: SignupRequest):
     if len(password) < 6:
         raise HTTPException(status_code=400, detail="Password must be at least 6 characters")
 
-    conn = get_db()
+    logging.info(f"[SIGNUP] Attempt for email={email}, username={username}")
+
+    try:
+        hashed = hash_password(password)
+    except Exception as e:
+        # If hashing itself explodes, we want to know
+        logging.error(f"[SIGNUP] Password hashing failed for {email}: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail="Internal server error")
+
+    try:
+        conn = get_db()
+    except Exception as e:
+        # get_db already logs, but be explicit here too
+        logging.error(f"[SIGNUP] get_db() failed for {email}: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail="Internal server error")
+
     try:
         cur = conn.cursor()
         cur.execute(
             "INSERT INTO users (email, username, password) VALUES (?, ?, ?)",
-            (email, username, hash_password(password)),
+            (email, username, hashed),
         )
         conn.commit()
+        logging.info(f"[SIGNUP] Success for email={email}, username={username}")
         return {"msg": "Signup successful"}
     except sqlite3.IntegrityError as e:
         conn.rollback()
-        logging.warning(f"[SIGNUP] Integrity error: {e}")
+        logging.warning(f"[SIGNUP] Integrity error for {email}, {username}: {e}")
         # Could be email or username; don't leak which one
         raise HTTPException(status_code=409, detail="Email or username already exists")
     except Exception as e:
         conn.rollback()
-        logging.error(f"[SIGNUP] error: {e}", exc_info=True)
+        logging.error(f"[SIGNUP] Unexpected DB error for {email}: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail="Internal server error")
     finally:
         conn.close()
+
 
 
 @app.post("/api/login")
